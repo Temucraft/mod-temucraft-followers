@@ -1,0 +1,5 @@
+## Interface: 30300
+## Title: Temucraft Missions
+## Notes: Window for the Temucraft mission table and companions (mod-temucraft-followers).
+## Version: 1.0
+TemucraftMissions.lua

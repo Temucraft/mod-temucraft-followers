@@ -1,0 +1,155 @@
+[worldserver]
+
+########################################
+# mod-temucraft-mission-table
+########################################
+#
+#    Temucraft.MissionTable.Enable
+#        Description: Missions for followers at the mission table (creature 608804).
+#        Default:     1
+
+Temucraft.MissionTable.Enable = 1
+
+#
+#    Temucraft.MissionTable.Offers
+#    Temucraft.MissionTable.OfferHours
+#        Description: How many missions each character is offered at a time, and how long an offer stays before it
+#                     is replaced (hours). Missions are offered up to two levels above the character's best follower.
+#        Default:     6, 24
+
+Temucraft.MissionTable.Offers = 6
+Temucraft.MissionTable.OfferHours = 24
+
+#
+#    Temucraft.MissionTable.MaxFollowers
+#    Temucraft.MissionTable.MaxFollowerLevel
+#    Temucraft.MissionTable.XpPerLevel
+#        Description: Roster size, follower level cap, and experience per level (level N needs N x this).
+#                     Each level also adds 5 item levels.
+#        Default:     20, 20, 400
+
+Temucraft.MissionTable.MaxFollowers = 20
+Temucraft.MissionTable.MaxFollowerLevel = 20
+Temucraft.MissionTable.XpPerLevel = 400
+
+#
+#    Temucraft.MissionTable.DurationScale
+#        Description: Multiplies every mission's duration (0.5 = twice as fast).
+#        Default:     1.0
+
+Temucraft.MissionTable.DurationScale = 1.0
+
+#
+#    Temucraft.MissionTable.Chance.Base
+#    Temucraft.MissionTable.Chance.PerLevelAbove
+#    Temucraft.MissionTable.Chance.PerLevelBelow
+#    Temucraft.MissionTable.Chance.PerItemLevel
+#    Temucraft.MissionTable.Chance.Counters
+#    Temucraft.MissionTable.Chance.Lucky
+#        Description: Success chance (percent): Base, + PerLevelAbove for each follower level above the mission
+#                     (- PerLevelBelow below it), + PerItemLevel per item level above the mission's, + Counters
+#                     times the share of threats countered (half of it when the mission has no threats), + Lucky
+#                     per Lucky follower. Scaled by followers sent / slots, capped at 200; above 100 the extra is
+#                     the chance of the bonus reward.
+#        Default:     40, 10, 15, 0.5, 60, 5
+
+Temucraft.MissionTable.Chance.Base = 40
+Temucraft.MissionTable.Chance.PerLevelAbove = 10
+Temucraft.MissionTable.Chance.PerLevelBelow = 15
+Temucraft.MissionTable.Chance.PerItemLevel = 0.5
+Temucraft.MissionTable.Chance.Counters = 60
+Temucraft.MissionTable.Chance.Lucky = 5
+
+#
+#    Temucraft.MissionTable.MailRewards
+#        Description: Send reward items by mail instead of into the bags (items are always mailed when bags are full).
+#        Default:     0
+
+Temucraft.MissionTable.MailRewards = 0
+
+#
+#    Temucraft.MissionTable.Addon.Anywhere
+#        Description: With the TemucraftMissions client addon, allow starting missions and claiming rewards from
+#                     anywhere (/missions). When off, the window still opens anywhere to look, but starting and
+#                     claiming need a mission table within Addon.Range yards.
+#        Default:     0
+#
+#    Temucraft.MissionTable.Addon.Range
+#        Description: How close a mission table has to be for the addon to start or claim missions.
+#        Default:     15
+
+Temucraft.MissionTable.Addon.Anywhere = 0
+Temucraft.MissionTable.Addon.Range = 15
+
+#
+#    Temucraft.MissionTable.WebOrders
+#        Description: Carry out the orders players give on the website's Companion page (start a mission, collect
+#                     finished ones): right away when the character is online, otherwise at its next login.
+#        Default:     1
+
+Temucraft.MissionTable.WebOrders = 1
+
+
+########################################
+# mod-temucraft-companions
+########################################
+#
+#    Temucraft.Companions.Enable
+#        Description: Mission-table followers can walk and fight with you (.companion).
+#        Default:     1
+
+Temucraft.Companions.Enable = 1
+
+#
+#    Temucraft.Companions.MaxLevel
+#    Temucraft.Companions.XpPerLevel
+#        Description: Companion level cap and experience per level (level N needs N x this). Kills give 5
+#                     (normal), 20 (elite) or 100 (boss) while the companion is out, for creatures at most 10
+#                     levels below you.
+#        Default:     30, 500
+
+Temucraft.Companions.MaxLevel = 30
+Temucraft.Companions.XpPerLevel = 500
+
+#
+#    Temucraft.Companions.Health.Tank
+#    Temucraft.Companions.Health.Other
+#    Temucraft.Companions.Damage.Tank
+#    Temucraft.Companions.Damage.Healer
+#    Temucraft.Companions.Damage.Damage
+#        Description: Health and melee damage as multiples of a normal creature of your level.
+#        Default:     3.0, 1.5, 0.8, 0.5, 1.4
+
+Temucraft.Companions.Health.Tank = 3.0
+Temucraft.Companions.Health.Other = 1.5
+Temucraft.Companions.Damage.Tank = 0.8
+Temucraft.Companions.Damage.Healer = 0.5
+Temucraft.Companions.Damage.Damage = 1.4
+
+#
+#    Temucraft.Companions.PerCompanionLevel
+#        Description: Extra health and damage per companion level (0.03 = +3%). Quality (uncommon / rare / epic)
+#                     and the follower's item level add on top.
+#        Default:     0.03
+
+Temucraft.Companions.PerCompanionLevel = 0.03
+
+#
+#    Temucraft.Companions.ExpeditionPhase
+#        Description: Phase of mod-temucraft-expeditions (its Temucraft.Expeditions.Phase). In a dungeon, a player in this phase
+#                     is in an expedition, so the companion needs the expedition bit (4) of its activity mask there.
+#        Default:     2
+
+Temucraft.Companions.ExpeditionPhase = 2
+
+#
+#    Temucraft.Companions.FollowerDungeons
+#    Temucraft.Companions.FollowerDungeons.PartySize
+#        Description: In a 5-player dungeon, .companion party (or Fill party in the window) fills the free places of
+#                     your group up to PartySize with idle followers that have the follower-dungeon bit (16): a tank
+#                     if nobody in the group tanks, a healer if nobody heals, damage for the rest. They leave with
+#                     the dungeon.
+#        Default:     1, 5
+
+Temucraft.Companions.FollowerDungeons = 1
+Temucraft.Companions.FollowerDungeons.PartySize = 5
