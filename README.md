@@ -49,7 +49,7 @@ and follower experience. It works from the mission table's gossip menu alone; th
 ### Followers
 
 `mod_temucraft_follower_template` (world database) defines them: name, the roles it can fill (`roles` bitmask:
-1 tank, 2 healer, 4 damage — 2 = only a healer, 3 = healer or tank, 7 = any), quality,
+1 tank, 2 healer, 4 damage; 2 = only a healer, 3 = healer or tank, 7 = any), quality,
 abilities (threats countered), traits, the creature used when it is out as a companion, an **activity mask** and how
 it is earned:
 
@@ -76,7 +76,7 @@ gold, Dream Shards, Abyss Crystals, Frozen Orbs, Runed Orbs and Emblems. Change 
   idle ones that can do missions are listed). The success chance comes from the server as you pick. **Start mission**.
 - **In Progress**: running missions with a live countdown; **Claim rewards** when they're done.
 - **Followers**: roster with roles, level and experience, item level, state, counters and traits.
-- **Companion** (only shown when mod-temucraft-companions is installed): summon a follower, dismiss it, change its role.
+- **Companion** (only shown when companions are on, `Temucraft.Companions.Enable`): summon a follower, dismiss it, change its role.
 
 Open it with `/missions` (or `/tmt`), `/companions` for the companion tab, or "Open the mission table window" in the
 table's gossip (shown once the addon has said hello). Looking works anywhere; starting and claiming need a mission
@@ -106,8 +106,8 @@ characters, otherwise at their next login (`Temucraft.MissionTable.WebOrders`).
 
 ### Install
 
-1. Put this folder in `modules/`, copy `conf/mod-temucraft-mission-table.conf.dist` to your config folder as
-   `mod-temucraft-mission-table.conf`, re-run CMake and build.
+1. Put this folder in `modules/`, copy `conf/mod-temucraft-followers.conf.dist` to your config folder as
+   `mod-temucraft-followers.conf`, re-run CMake and build.
 2. The SQL in `data/sql/` is applied by the worldserver on its next start.
 
 ### What it changes
@@ -117,7 +117,7 @@ characters, otherwise at their next login (`Temucraft.MissionTable.WebOrders`).
 | world | `mod_temucraft_follower_template`, `mod_temucraft_mission_template` | new: followers and missions |
 | world | `creature_template`, `creature_template_model`, `npc_text` | the mission table (608804) |
 | world | `module_string` | the module's texts |
-| characters | `mod_temucraft_follower`, `mod_temucraft_mission`, `mod_temucraft_web_order` | new: each character's followers and missions (the follower row also holds the `companion_*` columns used by mod-temucraft-companions) |
+| characters | `mod_temucraft_follower`, `mod_temucraft_mission`, `mod_temucraft_web_order` | new: each character's followers and missions (the follower row also holds the `companion_*` columns used by the companions) |
 
 ### Texts and translations
 
@@ -127,30 +127,27 @@ English text in the code is used.
 
 ### Works with other modules
 
-- mod-temucraft-companions summons these followers to fight beside you where their activity mask allows. The two
+- The companions (below) summon these followers to fight beside you where their activity mask allows. Both
   share `mod_temucraft_follower.state` (0 in the roster, 1 on a mission, 2 out as a companion), so a follower can't be
   in both places; the table re-reads it every time it is used.
 
-Part of the Temucraft modules for AzerothCore 3.3.5a.
-
 ## Companions
 
-One of your mission-table followers walks with you and fights in its role. Needs mod-temucraft-mission-table (it
-reads that module's followers).
+One of your mission table followers walks with you and fights in its role.
 
 ### Roles
 
-- **Tank** — attacks your target and taunts whatever is hitting you or your group.
-- **Healer** — keeps back and heals whoever is hurt most (Renew, Flash Heal when someone is low).
-- **Damage** — attacks your target.
+- **Tank**: attacks your target and taunts whatever is hitting you or your group.
+- **Healer**: keeps back and heals whoever is hurt most (Renew, Flash Heal when someone is low).
+- **Damage**: attacks your target.
 
-Each follower can only take the roles in its `roles` bitmask (set in mod-temucraft-mission-table's follower
-template: 1 tank, 2 healer, 4 damage — e.g. 2 = only a healer, 3 = healer or tank, 7 = any). It starts in the first
+Each follower can only take the roles in its `roles` bitmask (set in the follower
+template: 1 tank, 2 healer, 4 damage; e.g. 2 = only a healer, 3 = healer or tank, 7 = any). It starts in the first
 one it has; `.companion role tank|healer|damage` switches between the ones it can do (and is remembered).
 
 ### Where it may come
 
-The follower's **activity mask** (set per follower in mod-temucraft-mission-table, changeable with `.follower mask`):
+The follower's **activity mask** (set per follower in the follower template, changeable with `.follower mask`):
 2 dungeons, 8 raids, 32 the open world (world quests). 4 expeditions and 16 follower dungeons are for those features.
 Never in battlegrounds or arenas, and never while the follower is away on a mission. If you go somewhere it may not
 come, it waits and comes back on the next map that allows it.
@@ -174,10 +171,8 @@ A companion that was out when you logged off comes back when you log in.
 
 ### Install
 
-1. Install mod-temucraft-mission-table.
-2. Put this folder in `modules/`, copy `conf/mod-temucraft-companions.conf.dist` to your config folder as
-   `mod-temucraft-companions.conf`, re-run CMake and build.
-3. The SQL in `data/sql/` is applied by the worldserver on its next start.
+Part of this module: nothing to install separately (see Install above). Turn it off with
+`Temucraft.Companions.Enable = 0`.
 
 ### What it changes
 
@@ -195,7 +190,7 @@ you are somewhere it may be.
 
 ### Window
 
-The TemucraftMissions client addon from mod-temucraft-mission-table (`addon/`) has a Companion tab: summon, dismiss
+The TemucraftMissions client addon (`addon/`) has a Companion tab: summon, dismiss
 and change role with buttons. `/companions` opens it there. It uses addon whispers with the prefix `TCP`.
 
 ### Texts and translations
@@ -206,7 +201,7 @@ English text in the code is used.
 
 ### Follower state (shared with the mission table)
 
-`mod_temucraft_follower.state` in the characters database says where each follower is, and both modules read it
+`mod_temucraft_follower.state` in the characters database says where each follower is, and both parts read it
 before using a follower and change it only from the value they expect:
 
 | state | meaning |
