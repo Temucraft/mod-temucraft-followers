@@ -40,25 +40,35 @@ Temucraft.MissionTable.XpPerLevel = 400
 Temucraft.MissionTable.DurationScale = 1.0
 
 #
-#    Temucraft.MissionTable.Chance.Base
-#    Temucraft.MissionTable.Chance.PerLevelAbove
-#    Temucraft.MissionTable.Chance.PerLevelBelow
-#    Temucraft.MissionTable.Chance.PerItemLevel
-#    Temucraft.MissionTable.Chance.Counters
+#    Temucraft.MissionTable.Chance.ThreatWeight
+#        Description: Weight of a mission threat when the mission template gives none (threat_weights). The success
+#                     chance works like the garrison mission table: total weight = follower slots x 100 + threat
+#                     weights; each follower adds 100 to 150 (by level and item level against the mission), each
+#                     countered threat adds its weight, matching traits add more; then
+#                     chance = base_chance + (100 - base_chance) x points / total weight. See the README.
+#        Default:     300
+#
 #    Temucraft.MissionTable.Chance.Lucky
-#        Description: Success chance (percent): Base, + PerLevelAbove for each follower level above the mission
-#                     (- PerLevelBelow below it), + PerItemLevel per item level above the mission's, + Counters
-#                     times the share of threats countered (half of it when the mission has no threats), + Lucky
-#                     per Lucky follower. Scaled by followers sent / slots, capped at 200; above 100 the extra is
-#                     the chance of the bonus reward.
-#        Default:     40, 10, 15, 0.5, 60, 5
+#        Description: Percent added to the success chance by each follower with the Lucky trait.
+#        Default:     5
+#
+#    Temucraft.MissionTable.Chance.Max
+#        Description: Highest success chance (percent, 100 or more). Above 100 the extra is the chance of the
+#                     bonus reward.
+#        Default:     200
 
-Temucraft.MissionTable.Chance.Base = 40
-Temucraft.MissionTable.Chance.PerLevelAbove = 10
-Temucraft.MissionTable.Chance.PerLevelBelow = 15
-Temucraft.MissionTable.Chance.PerItemLevel = 0.5
-Temucraft.MissionTable.Chance.Counters = 60
+Temucraft.MissionTable.Chance.ThreatWeight = 300
 Temucraft.MissionTable.Chance.Lucky = 5
+Temucraft.MissionTable.Chance.Max = 200
+
+#
+#    Temucraft.MissionTable.EnforceSlots
+#        Description: Abilities and traits a follower may have by quality: Uncommon 1 + 1, Rare 1 + 2, Epic 2 + 3,
+#                     Legendary 3 + 3. With 1, extra ones in a follower template are ignored (a warning is logged
+#                     either way).
+#        Default:     1
+
+Temucraft.MissionTable.EnforceSlots = 1
 
 #
 #    Temucraft.MissionTable.MailRewards

@@ -10,8 +10,40 @@ local ROWS = 9
 
 local THREATS = { "Hazardous Ground", "Lethal Lackeys", "Area Assault", "Hexes", "Crushing Blow",
                   "Hordes", "Arcane Barrage", "Race Against Time", "Berserk Fury" }
-local TRAITS = { "Swift Feet", "Gold Nose", "Keen Mind", "Lucky", "Watchful" }
-local TYPES = { [0] = "", [1] = " (patrol)", [2] = " (treasure)", [3] = " (rare)" }
+-- trait id -> { name, what it does } (same list as TemucraftMissionChance.h on the server)
+local TRAIT_INFO = {
+    [1] = { "Swift Feet", "Missions take 25% less time." }, [2] = { "Gold Nose", "+50% gold from missions." },
+    [3] = { "Keen Mind", "+50% follower experience." }, [4] = { "Lucky", "A flat bonus to the success chance." },
+    [5] = { "Watchful", "Better on patrol and exploration missions." }, [6] = { "Lone Wolf", "Better when sent alone." },
+    [7] = { "Mentor", "The others count at the best level and item level of the group." },
+    [8] = { "Long Haul", "Better on missions of 8 hours or more." }, [9] = { "Quick Strike", "Better on missions shorter than 4 hours." },
+    [10] = { "Veteran", "A little better on every mission." },
+    [11] = { "Friend of Humans", "Better with a Human follower." }, [12] = { "Friend of Orcs", "Better with an Orc follower." },
+    [13] = { "Friend of Dwarves", "Better with a Dwarf follower." }, [14] = { "Friend of Elves", "Better with a Night Elf or Blood Elf follower." },
+    [15] = { "Friend of Gnomes", "Better with a Gnome follower." }, [16] = { "Friend of Tauren", "Better with a Tauren follower." },
+    [17] = { "Friend of Trolls", "Better with a Troll follower." }, [18] = { "Friend of the Forsaken", "Better with an Undead follower." },
+    [19] = { "Friend of Draenei", "Better with a Draenei follower." },
+}
+local ENVS = { "Forest", "Mountains", "Plains", "Snow", "Desert", "Underground", "Swamp", "Jungle", "Town" }
+local ENEMIES = { "Undead", "Beast", "Dragonkin", "Elemental", "Demon", "Giant", "Humanoid", "Troll", "Vrykul", "Nerubian",
+                  "Construct", "Ogre", "Orc", "Harpy", "Aberration" }
+local RACES = { [1] = "Human", [2] = "Orc", [3] = "Dwarf", [4] = "Night Elf", [5] = "Undead", [6] = "Tauren", [7] = "Gnome",
+                [8] = "Troll", [10] = "Blood Elf", [11] = "Draenei" }
+do
+    local env = { "Woodland Guide", "Mountain Born", "Plains Runner", "Frost Hardened", "Sand Walker", "Tunnel Rat", "Bog Wader", "Jungle Stalker", "Street Wise" }
+    for i, n in ipairs(env) do TRAIT_INFO[20 + i] = { n, "Better in " .. string.lower(ENVS[i]) .. " missions." } end
+    local slayer = { "Undead", "Beast", "Dragon", "Elemental", "Demon", "Giant", "Bandit", "Troll", "Vrykul", "Nerubian", "Construct", "Ogre", "Orc", "Harpy", "Void" }
+    for i, n in ipairs(slayer) do TRAIT_INFO[30 + i] = { n .. " Slayer", "Better against " .. string.lower(ENEMIES[i]) .. " enemies." } end
+    local prof = { { "Alchemist", "Alchemy" }, { "Blacksmith", "Blacksmithing" }, { "Enchanter", "Enchanting" }, { "Engineer", "Engineering" },
+                   { "Herbalist", "Herbalism" }, { "Scribe", "Inscription" }, { "Jeweler", "Jewelcrafting" }, { "Leatherworker", "Leatherworking" },
+                   { "Miner", "Mining" }, { "Skinner", "Skinning" }, { "Tailor", "Tailoring" }, { "Cook", "Cooking" }, { "Angler", "Fishing" },
+                   { "Medic", "First Aid" } }
+    for i, n in ipairs(prof) do TRAIT_INFO[50 + i] = { n[1], n[2] .. ": can take " .. string.lower(n[2]) .. " missions." } end
+end
+local TRAITS = {}
+for id, t in pairs(TRAIT_INFO) do TRAITS[id] = t[1] end
+local TYPES = { [0] = "", [1] = " (patrol)", [2] = " (treasure)", [3] = " (rare)", [4] = " (exploration)", [5] = " (training)",
+                [6] = " (logistics)", [7] = " (profession)" }
 local STATES = { [0] = "", [1] = "|cffff9900on a mission|r", [2] = "|cff66ccffcompanion|r" }
 local ROLE_BITS = { { 1, "Tank" }, { 2, "Healer" }, { 4, "Damage" } }
 
@@ -20,6 +52,7 @@ local M = { followers = {}, order = {}, offers = {}, running = {}, near = false,
 local C = { list = {}, active = 0, role = 255, here = 0, server = false }
 local pendingM, pendingC = nil, nil
 local selected, picked, chance = nil, {}, nil   -- the offer being staffed
+local explain = nil                              -- the breakdown of the chance being collected (XB/XF/XT/XS lines)
 local tab, scroll = 1, 0
 
 -- ----------------------------------------------------------------------------------------------- helpers
@@ -157,6 +190,11 @@ dText:SetPoint("TOPLEFT", 10, -10); dText:SetPoint("RIGHT", -10, 0)
 dText:SetJustifyH("LEFT"); dText:SetJustifyV("TOP")
 local dChance = detail:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 dChance:SetPoint("BOTTOMLEFT", 10, 40)
+-- hover the chance for the breakdown the server sent (who adds what)
+local chanceHover = CreateFrame("Frame", nil, detail)
+chanceHover:SetPoint("BOTTOMLEFT", 6, 34)
+Size(chanceHover, 216, 22)
+chanceHover:EnableMouse(true)
 local startBtn = Button(detail, "Start mission", 120, 22)
 startBtn:SetPoint("BOTTOMLEFT", 8, 10)
 local clearBtn = Button(detail, "Clear", 80, 22)
@@ -219,6 +257,7 @@ local function ShowRows(items, fill)
     for i = 1, ROWS do
         local r, item = rows[i], items[i + scroll]
         r.btn:Hide(); r.sel:Hide(); r:SetScript("OnClick", nil); r.btn:SetScript("OnClick", nil)
+        r:SetScript("OnEnter", nil); r:SetScript("OnLeave", nil)
         if item then
             r.top:SetText(""); r.sub:SetText(""); r.right:SetText("")
             fill(r, item); r:Show()
@@ -242,6 +281,80 @@ local function RunningList()
     return out
 end
 
+local function NameOf(id)
+    local f = M.followers[id]
+    return f and Colored(f) or ("#" .. tostring(id))
+end
+
+local function Tenths(v) return string.format("%.1f", (v or 0) / 10) end
+
+-- the success chance breakdown, as a tooltip
+local function ShowExplain(owner)
+    local o = selected and M.offers[selected]
+    if not o or not chance then return end
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:AddLine("Success chance " .. chance.chance .. "%")
+    local x = chance.explain
+    if not x then
+        GameTooltip:AddLine("No breakdown from the server.", 0.7, 0.7, 0.7)
+        GameTooltip:Show()
+        return
+    end
+    GameTooltip:AddLine("Base " .. x.base .. "% + (100 - base) x points / 100", 0.8, 0.8, 0.8)
+    GameTooltip:AddDoubleLine("Points", Tenths(x.points), 1, 1, 1, 1, 1, 1)
+    GameTooltip:AddLine("Total weight " .. x.weight .. " (" .. o.slots .. " x 100 + threats)", 0.6, 0.6, 0.6)
+    if x.mentor then GameTooltip:AddLine("Mentor: everyone counts at the best level and item level.", 0.4, 0.8, 1) end
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("Followers", 1, 0.82, 0)
+    for _, fp in ipairs(x.followers) do
+        local b = fp.bias / 100
+        local r, g = b < 0 and 1 or 0.6, b < 0 and 0.4 or 1
+        GameTooltip:AddDoubleLine(NameOf(fp.id) .. string.format("  L%d / %d (bias %+.2f)", fp.level, fp.ilvl, b), "+" .. Tenths(fp.points), 1, 1, 1, r, g, 0.4)
+    end
+    if #x.threats > 0 then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Threats", 1, 0.82, 0)
+        for _, tp in ipairs(x.threats) do
+            local label = (THREATS[tp.threat] or "?") .. (tp.count > 1 and (" x" .. tp.count) or "") .. " (" .. tp.weight .. ")"
+            if #tp.by > 0 then
+                local who = {}
+                for _, id in ipairs(tp.by) do table.insert(who, NameOf(id)) end
+                GameTooltip:AddDoubleLine(label .. " - " .. table.concat(who, ", "), "+" .. Tenths(tp.points), 0.6, 1, 0.6, 0.6, 1, 0.6)
+            else
+                GameTooltip:AddDoubleLine(label, "not countered", 1, 0.4, 0.4, 1, 0.4, 0.4)
+            end
+        end
+    end
+    if #x.traits > 0 then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Traits", 1, 0.82, 0)
+        for _, tp in ipairs(x.traits) do
+            GameTooltip:AddDoubleLine((TRAITS[tp.trait] or "?") .. " - " .. NameOf(tp.follower), "+" .. Tenths(tp.points), 0.4, 0.8, 1, 0.4, 0.8, 1)
+        end
+    end
+    if x.lucky > 0 then GameTooltip:AddDoubleLine("Lucky", "+" .. Tenths(x.lucky) .. "%", 0.4, 0.8, 1, 0.4, 0.8, 1) end
+    if chance.chance > 100 then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Bonus reward chance: " .. (chance.chance - 100) .. "%", 0.2, 1, 0.2)
+    end
+    GameTooltip:Show()
+end
+chanceHover:SetScript("OnEnter", ShowExplain)
+chanceHover:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+-- a follower's traits, with what they do
+local function FollowerTooltip(owner, f)
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(Colored(f))
+    GameTooltip:AddLine((RACES[f.race] or "") .. "  Level " .. f.level .. ", item level " .. f.ilvl, 0.8, 0.8, 0.8)
+    if #f.abilities > 0 then GameTooltip:AddLine("Counters: " .. Names(f.abilities, THREATS), 0.6, 1, 0.6, true) end
+    for _, t in ipairs(f.traits) do
+        local info = TRAIT_INFO[t]
+        if info then GameTooltip:AddLine(info[1] .. ": " .. info[2], 0.4, 0.8, 1, true) end
+    end
+    GameTooltip:Show()
+end
+
 local function UpdateDetail()
     local o = selected and M.offers[selected]
     if not o then
@@ -249,13 +362,16 @@ local function UpdateDetail()
         dChance:SetText(""); startBtn:Disable(); clearBtn:Disable()
         return
     end
-    local lines = { "|cffffd100" .. o.name .. TYPES[o.type] .. "|r",
-                    "Level " .. o.level .. (o.ilvl > 0 and (", item level " .. o.ilvl) or ""),
+    local lines = { "|cffffd100" .. o.name .. (TYPES[o.type] or "") .. "|r",
+                    "Level " .. o.level .. (o.ilvl > 0 and (", item level " .. o.ilvl) or "") .. (o.base and ("    Base " .. o.base .. "%") or ""),
+                    (o.location ~= "" and (o.location .. "  -  ") or "") .. (ENVS[o.env] or "anywhere"),
+                    "Enemies: " .. (ENEMIES[o.enemy] or "mixed"),
                     "Duration: " .. Time(o.seconds) .. "    Cost: " .. Coins(o.cost),
-                    "Followers: " .. #picked .. " / " .. o.slots,
-                    "Expires in " .. Time(o.expires - (GetTime() - M.stamp)), "", "|cffffd100Threats|r" }
+                    "Followers: " .. #picked .. " / " .. o.slots .. "    Expires in " .. Time(o.expires - (GetTime() - M.stamp)) }
+    if o.req > 0 then table.insert(lines, "|cffff9900Needs a follower with " .. (TRAITS[o.req] or "?") .. "|r") end
+    table.insert(lines, ""); table.insert(lines, "|cffffd100Threats|r (weight)")
     if #o.threats == 0 then table.insert(lines, "  none") end
-    for _, t in ipairs(o.threats) do table.insert(lines, "  " .. (THREATS[t] or "?")) end
+    for i, t in ipairs(o.threats) do table.insert(lines, "  " .. (THREATS[t] or "?") .. "  |cffaaaaaa(" .. (o.weights[i] or 300) .. ")|r") end
     table.insert(lines, ""); table.insert(lines, "|cffffd100Sent|r")
     if #picked == 0 then table.insert(lines, "  nobody yet") end
     for _, id in ipairs(picked) do local f = M.followers[id]; if f then table.insert(lines, "  " .. Colored(f)) end end
@@ -263,7 +379,7 @@ local function UpdateDetail()
     if chance then
         local c = chance.chance
         local color = c >= 100 and "|cff20ff20" or c >= 60 and "|cffffff00" or "|cffff4040"
-        dChance:SetText("Success: " .. color .. c .. "%|r  (" .. chance.countered .. "/" .. chance.threats .. " countered)")
+        dChance:SetText("Success: " .. color .. c .. "%|r  (" .. chance.countered .. "/" .. chance.threats .. " countered)  |cffaaaaaa[?]|r")
     else
         dChance:SetText("")
     end
@@ -309,13 +425,23 @@ function Refresh()
                 local o = it.o
                 r.top:SetText((o.type == 3 and "|cffa335ee" or "|cffffd100") .. o.name .. TYPES[o.type] .. "|r")
                 r.sub:SetText("Level " .. o.level .. "  -  " .. o.slots .. " follower(s)  -  " .. Time(o.seconds) .. "  -  " .. Coins(o.cost))
-                r.right:SetText(#o.threats .. " threat(s)")
+                r.right:SetText((ENVS[o.env] and (ENVS[o.env] .. "  -  ") or "") .. #o.threats .. " threat(s)")
                 if o.slot == selected then r.sel:Show() end
                 r:SetScript("OnClick", function() selected = o.slot; picked = {}; chance = nil; Refresh() end)
             else
                 local f = it.f
                 r.top:SetText("   " .. Colored(f) .. "  |cffaaaaaa(" .. Roles(f.roles) .. ")|r")
-                r.sub:SetText("   Level " .. f.level .. ", item level " .. f.ilvl .. "  -  counters: " .. Names(f.abilities, THREATS))
+                local o = M.offers[selected]
+                local counters = {}
+                for _, a in ipairs(f.abilities) do
+                    local hit = false
+                    for _, t in ipairs(o.threats) do if t == a then hit = true end end
+                    table.insert(counters, (hit and "|cff20ff20" or "") .. (THREATS[a] or "?") .. (hit and "|r" or ""))
+                end
+                r.sub:SetText("   Level " .. f.level .. ", item level " .. f.ilvl .. "  -  counters: " .. (#counters > 0 and table.concat(counters, ", ") or "-")
+                    .. "  -  " .. Names(f.traits, TRAITS))
+                r:SetScript("OnEnter", function(self) FollowerTooltip(self, f) end)
+                r:SetScript("OnLeave", function() GameTooltip:Hide() end)
                 local n = IsPicked(f.id)
                 if n then r.sel:Show() end
                 r.btn:SetText(n and "Remove" or "Send"); r.btn:Show()
@@ -343,7 +469,9 @@ function Refresh()
         for _, id in ipairs(M.order) do table.insert(items, M.followers[id]) end
         ShowRows(items, function(r, f)
             r.top:SetText(Colored(f) .. "  |cffaaaaaa(" .. Roles(f.roles) .. ")|r  " .. (STATES[f.state] or ""))
-            r.sub:SetText("Counters: " .. Names(f.abilities, THREATS) .. "   Traits: " .. Names(f.traits, TRAITS))
+            r.sub:SetText((RACES[f.race] and (RACES[f.race] .. "   ") or "") .. "Counters: " .. Names(f.abilities, THREATS) .. "   Traits: " .. Names(f.traits, TRAITS))
+            r:SetScript("OnEnter", function(self) FollowerTooltip(self, f) end)
+            r:SetScript("OnLeave", function() GameTooltip:Hide() end)
             r.right:SetText("Level " .. f.level .. (f.xpNext > 0 and (" (" .. f.xp .. "/" .. f.xpNext .. " xp)") or " (max)") .. "  -  ilvl " .. f.ilvl)
         end)
     elseif tab == 4 then
@@ -401,11 +529,13 @@ local function OnMission(msg)
     elseif k == "F" then
         local f = { id = tonumber(a[2]), name = a[3], roles = tonumber(a[4]) or 4, level = tonumber(a[5]) or 1, xp = tonumber(a[6]) or 0,
                     xpNext = tonumber(a[7]) or 0, ilvl = tonumber(a[8]) or 0, quality = tonumber(a[9]) or 2, state = tonumber(a[10]) or 0,
-                    mask = tonumber(a[11]) or 0, abilities = Ids(a[12]), traits = Ids(a[13]) }
+                    mask = tonumber(a[11]) or 0, abilities = Ids(a[12]), traits = Ids(a[13]), race = tonumber(a[14]) or 0 }
         pendingM.followers[f.id] = f; table.insert(pendingM.order, f.id)
     elseif k == "O" then
         local o = { slot = tonumber(a[2]), name = a[3], type = tonumber(a[4]) or 0, level = tonumber(a[5]) or 1, ilvl = tonumber(a[6]) or 0,
-                    seconds = tonumber(a[7]) or 0, slots = tonumber(a[8]) or 1, cost = tonumber(a[9]) or 0, threats = Ids(a[10]), expires = tonumber(a[11]) or 0 }
+                    seconds = tonumber(a[7]) or 0, slots = tonumber(a[8]) or 1, cost = tonumber(a[9]) or 0, threats = Ids(a[10]), expires = tonumber(a[11]) or 0,
+                    env = tonumber(a[12]) or 0, enemy = tonumber(a[13]) or 0, base = tonumber(a[14]), weights = Ids(a[15]),
+                    req = tonumber(a[16]) or 0, location = a[17] or "" }
         pendingM.offers[o.slot] = o
     elseif k == "R" then
         local r = { slot = tonumber(a[2]), name = a[3], chance = tonumber(a[4]) or 0, ends = GetTime() + (tonumber(a[5]) or 0), followers = Ids(a[6]) }
@@ -422,8 +552,22 @@ end
 
 local function OnChance(msg)
     local a = Split(msg, "~")
-    if a[1] == "C" and tonumber(a[2]) == selected then
-        chance = { chance = tonumber(a[3]) or 0, countered = tonumber(a[4]) or 0, threats = tonumber(a[5]) or 0 }
+    local k = a[1]
+    if tonumber(a[2]) ~= selected then return end
+    if k == "XB" then
+        explain = { base = tonumber(a[3]) or 0, weight = tonumber(a[4]) or 0, points = tonumber(a[5]) or 0, lucky = tonumber(a[6]) or 0,
+                    mentor = a[7] == "1", followers = {}, threats = {}, traits = {} }
+    elseif k == "XF" and explain then
+        table.insert(explain.followers, { id = tonumber(a[3]), level = tonumber(a[4]) or 0, ilvl = tonumber(a[5]) or 0,
+                                          bias = tonumber(a[6]) or 0, points = tonumber(a[7]) or 0 })
+    elseif k == "XT" and explain then
+        table.insert(explain.threats, { threat = tonumber(a[3]) or 0, count = tonumber(a[4]) or 1, weight = tonumber(a[5]) or 0,
+                                        removed = tonumber(a[6]) or 0, points = tonumber(a[7]) or 0, by = Ids(a[8]) })
+    elseif k == "XS" and explain then
+        table.insert(explain.traits, { follower = tonumber(a[3]), trait = tonumber(a[4]) or 0, points = tonumber(a[5]) or 0 })
+    elseif k == "C" then
+        chance = { chance = tonumber(a[3]) or 0, countered = tonumber(a[4]) or 0, threats = tonumber(a[5]) or 0, explain = explain }
+        explain = nil
         Refresh()
     end
 end
@@ -455,7 +599,8 @@ ev:SetScript("OnEvent", function(_, event, prefix, msg, channel, sender)
     end
     if channel ~= "WHISPER" or sender ~= UnitName("player") then return end
     if prefix == TMT then
-        if string.sub(msg, 1, 2) == "C~" then OnChance(msg) else OnMission(msg) end
+        local k = string.sub(msg, 1, 3)
+        if string.sub(msg, 1, 2) == "C~" or k == "XB~" or k == "XF~" or k == "XT~" or k == "XS~" then OnChance(msg) else OnMission(msg) end
     elseif prefix == TCP then
         OnCompanion(msg)
     end

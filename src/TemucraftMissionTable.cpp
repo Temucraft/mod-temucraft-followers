@@ -14,8 +14,11 @@
  *   world quests). Owned followers (characters table mod_temucraft_follower) have their own level, item level, mask.
  * - Missions (world table mod_temucraft_mission_template) have a level, item level, duration, 1-3 follower slots,
  *   enemy threats, a cost and rewards. Every character gets its own list of offered missions, refreshed on a timer.
- * - Success chance: base + level and item level difference + share of threats countered + traits, capped at 200%.
- *   Above 100% the bonus reward is rolled with the extra chance.
+ * - Success chance: the Warlords garrison formula (TemucraftMissionChance.h): each follower's level and item level
+ *   against the mission's, threats countered, environment and enemy race traits, then
+ *   chance = base + (100 - base) * points / 100, capped at 200%. Above 100% the bonus reward is rolled with the
+ *   extra chance. The window can ask for the breakdown (explain lines).
+ * - Mission types: battle, patrol, treasure, rare, exploration, training, logistics, profession.
  * - Missions run while the player is offline; the results wait at the table (Mission report).
  *
  * Text comes from module_string (module "mod-temucraft-mission-table"), with English built in as a fallback.
@@ -29,6 +32,7 @@
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Item.h"
+#include "Log.h"
 #include "ItemScript.h"
 #include "Mail.h"
 #include "ObjectAccessor.h"
@@ -40,6 +44,7 @@
 #include "ScriptedGossip.h"
 #include "StringFormat.h"
 #include "TemucraftAddonMessage.h"
+#include "TemucraftMissionChance.h"
 #include "TemucraftModuleText.h"
 #include "Tokenize.h"
 #include "WorldScript.h"
@@ -52,6 +57,7 @@
 #include <vector>
 
 using namespace Acore::ChatCommands;
+using namespace TemucraftMission;
 
 namespace
 {
@@ -65,8 +71,6 @@ namespace
     };
     enum Source : uint8 { SRC_STARTER = 0, SRC_QUEST = 1, SRC_REPUTATION = 2, SRC_ITEM = 3, SRC_NONE = 4 };
     enum FollowerState : uint8 { F_IDLE = 0, F_ON_MISSION = 1, F_COMPANION = 2 };
-    enum Trait : uint8 { TRAIT_FAST = 1, TRAIT_TREASURE = 2, TRAIT_QUICK_STUDY = 3, TRAIT_LUCKY = 4, TRAIT_PATROLLER = 5 };
-    enum MissionType : uint8 { M_BATTLE = 0, M_PATROL = 1, M_TREASURE = 2, M_RARE = 3 };
 
     enum Str : uint32
     {
@@ -75,14 +79,18 @@ namespace
         S_START, S_CLEAR, S_NEED_FOLLOWERS, S_NO_MONEY, S_STARTED, S_CLAIM, S_SUCCESS, S_FAILED, S_BONUS,
         S_LEVEL_UP, S_NEW_FOLLOWER, S_READY_LOGIN, S_NOTHING_READY, S_NONE_OFFERED, S_NONE_RUNNING, S_COUNTERED,
         S_REWARD_GOLD, S_REWARD_ITEM, S_REWARD_XP, S_MAIL_SUBJECT, S_MAIL_BODY, S_PICKED_LINE, S_BUSY,
-        S_WINDOW, S_NEED_TABLE
+        S_WINDOW, S_NEED_TABLE,
+        S_WHERE = 40, S_THREAT_WEIGHT, S_NEEDS_TRAIT, S_EXPLAIN_FOLLOWER, S_EXPLAIN_THREAT, S_EXPLAIN_TRAIT, S_NO_TRAIT
     };
     constexpr char const* ADDON_PREFIX = "TMT";
 
-    char const* const THREAT_NAMES[] = { "", "Hazardous Ground", "Lethal Lackeys", "Area Assault", "Hexes", "Crushing Blow",
-                                         "Hordes", "Arcane Barrage", "Race Against Time", "Berserk Fury" };
-    constexpr uint8 MAX_THREAT = 9;
-    char const* const TRAIT_NAMES[] = { "", "Swift Feet", "Gold Nose", "Keen Mind", "Lucky", "Watchful" };
+    // a very large cooldown means the mission is never offered again once it succeeded (one-time story missions)
+    constexpr uint32 ONE_TIME_COOLDOWN = 0x7FFFFFFF;
+    constexpr uint32 NEVER = 0xFFFFFFFF;
+    char const* TraitName(uint8 id) { TraitInfo const* t = GetTrait(id); return t ? t->name : "?"; }
+    char const* EnvName(uint8 id) { return id && id <= MAX_ENV ? ENV_NAMES[id] : "-"; }
+    char const* EnemyName(uint8 id) { return id && id <= MAX_ENEMY ? ENEMY_NAMES[id] : "-"; }
+    char const* TypeName(uint8 id) { return TYPE_NAMES[std::min<uint8>(id, MAX_MISSION_TYPE)]; }
     char const* const ROLE_NAMES[] = { "Tank", "Healer", "Damage" };
     std::string RoleNames(uint8 roles)
     {
@@ -96,6 +104,7 @@ namespace
         uint32 id = 0, creatureEntry = 0;
         std::string name;
         uint8 roles = 4, quality = 2;   // roles: 1 tank, 2 healer, 4 damage
+        uint8 race = 0;                 // player race id, for race pairing traits
         std::vector<uint8> abilities, traits;
         uint32 mask = ACT_MISSIONS;
         uint8 source = SRC_NONE;
@@ -108,6 +117,10 @@ namespace
         uint8 type = M_BATTLE, level = 1, slots = 1;
         uint32 itemLevel = 0, duration = 1800, cost = 0, xp = 100, gold = 0, item = 0, itemCount = 0, bonusItem = 0, bonusCount = 0, weight = 100;
         std::vector<uint8> threats;
+        std::vector<uint32> threatWeights;   // same order as threats; 0 or missing = Chance.ThreatWeight
+        uint8 baseChance = 50, environment = 0, enemyRace = 0, requiredTrait = 0;
+        uint32 cooldown = 0;                 // seconds before it is offered again after a success
+        std::string location;
     };
     struct Follower
     {
@@ -125,6 +138,7 @@ namespace
     {
         std::map<uint32, Follower> followers;
         std::map<uint32, Mission> missions;   // by slot
+        std::map<uint32, uint32> cooldowns;   // mission template -> time it may be offered again
         uint32 nextFollower = 1, nextSlot = 1;
         uint32 viewing = 0;                   // offered mission being staffed
         std::vector<uint32> picked;
@@ -136,9 +150,9 @@ namespace
         bool enable = true;
         uint32 offers = 6, offerHours = 24, maxFollowers = 20, maxLevel = 20, xpPerLevel = 400;
         float durationScale = 1.0f;
-        int32 baseChance = 40, perLevel = 10, perLevelBelow = 15;
-        float perItemLevel = 0.5f;
-        int32 counterShare = 60, luckyBonus = 5;
+        uint32 threatWeight = 300;
+        float luckyBonus = 5.0f, maxChance = 200.0f;
+        bool enforceSlots = true;
         bool mailRewards = false;
         bool addonAnywhere = false, webOrders = true;
         float addonRange = 15.0f;
@@ -191,12 +205,10 @@ namespace
         cfg.maxLevel = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("Temucraft.MissionTable.MaxFollowerLevel", 20));
         cfg.xpPerLevel = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("Temucraft.MissionTable.XpPerLevel", 400));
         cfg.durationScale = sConfigMgr->GetOption<float>("Temucraft.MissionTable.DurationScale", 1.0f);
-        cfg.baseChance = sConfigMgr->GetOption<int32>("Temucraft.MissionTable.Chance.Base", 40);
-        cfg.perLevel = sConfigMgr->GetOption<int32>("Temucraft.MissionTable.Chance.PerLevelAbove", 10);
-        cfg.perLevelBelow = sConfigMgr->GetOption<int32>("Temucraft.MissionTable.Chance.PerLevelBelow", 15);
-        cfg.perItemLevel = sConfigMgr->GetOption<float>("Temucraft.MissionTable.Chance.PerItemLevel", 0.5f);
-        cfg.counterShare = sConfigMgr->GetOption<int32>("Temucraft.MissionTable.Chance.Counters", 60);
-        cfg.luckyBonus = sConfigMgr->GetOption<int32>("Temucraft.MissionTable.Chance.Lucky", 5);
+        cfg.threatWeight = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("Temucraft.MissionTable.Chance.ThreatWeight", 300));
+        cfg.luckyBonus = sConfigMgr->GetOption<float>("Temucraft.MissionTable.Chance.Lucky", 5.0f);
+        cfg.maxChance = std::clamp(sConfigMgr->GetOption<float>("Temucraft.MissionTable.Chance.Max", 200.0f), 100.0f, 1000.0f);
+        cfg.enforceSlots = sConfigMgr->GetOption<bool>("Temucraft.MissionTable.EnforceSlots", true);
         cfg.mailRewards = sConfigMgr->GetOption<bool>("Temucraft.MissionTable.MailRewards", false);
         cfg.addonAnywhere = sConfigMgr->GetOption<bool>("Temucraft.MissionTable.Addon.Anywhere", false);
         cfg.webOrders = sConfigMgr->GetOption<bool>("Temucraft.MissionTable.WebOrders", true);
@@ -206,7 +218,7 @@ namespace
     void LoadTemplates()
     {
         followerTemplates.clear(); missionTemplates.clear();
-        if (QueryResult r = WorldDatabase.Query("SELECT id, creature_entry, name, roles, quality, abilities, traits, activity_mask, source, source_value, source_value2 FROM mod_temucraft_follower_template"))
+        if (QueryResult r = WorldDatabase.Query("SELECT id, creature_entry, name, roles, quality, abilities, traits, activity_mask, source, source_value, source_value2, race FROM mod_temucraft_follower_template"))
             do
             {
                 Field* f = r->Fetch(); FollowerTemplate t;
@@ -214,9 +226,23 @@ namespace
                 t.roles = f[3].Get<uint8>() & 7; if (!t.roles) t.roles = 4; t.quality = f[4].Get<uint8>();
                 t.abilities = ParseList(f[5].Get<std::string>()); t.traits = ParseList(f[6].Get<std::string>());
                 t.mask = f[7].Get<uint32>(); t.source = f[8].Get<uint8>(); t.sourceValue = f[9].Get<uint32>(); t.sourceValue2 = f[10].Get<uint32>();
+                t.race = f[11].Get<uint8>();
+                // ability and trait slots by quality (Uncommon 1 + 1, Rare 1 + 2, Epic 2 + 3, Legendary 3 + 3)
+                uint8 maxAbilities = AbilitySlots(t.quality), maxTraits = TraitSlots(t.quality);
+                if (t.abilities.size() > maxAbilities || t.traits.size() > maxTraits)
+                {
+                    LOG_WARN("module", "mod-temucraft-mission-table: follower template {} ({}) has {} abilities and {} traits, quality {} allows {} and {}{}",
+                        t.id, t.name, t.abilities.size(), t.traits.size(), t.quality, maxAbilities, maxTraits, cfg.enforceSlots ? "; the extra ones are ignored" : "");
+                    if (cfg.enforceSlots)
+                    {
+                        if (t.abilities.size() > maxAbilities) t.abilities.resize(maxAbilities);
+                        if (t.traits.size() > maxTraits) t.traits.resize(maxTraits);
+                    }
+                }
                 followerTemplates[t.id] = t;
             } while (r->NextRow());
-        if (QueryResult r = WorldDatabase.Query("SELECT id, name, type, level, item_level, duration, slots, threats, cost, xp, gold, reward_item, reward_count, bonus_item, bonus_count, weight FROM mod_temucraft_mission_template"))
+        if (QueryResult r = WorldDatabase.Query("SELECT id, name, type, level, item_level, duration, slots, threats, cost, xp, gold, reward_item, reward_count, bonus_item, bonus_count, weight, "
+                "base_chance, threat_weights, environment, enemy_race, cooldown, location, required_trait FROM mod_temucraft_mission_template"))
             do
             {
                 Field* f = r->Fetch(); MissionTemplate m;
@@ -225,6 +251,12 @@ namespace
                 m.threats = ParseList(f[7].Get<std::string>()); m.cost = f[8].Get<uint32>(); m.xp = f[9].Get<uint32>(); m.gold = f[10].Get<uint32>();
                 m.item = f[11].Get<uint32>(); m.itemCount = f[12].Get<uint32>(); m.bonusItem = f[13].Get<uint32>(); m.bonusCount = f[14].Get<uint32>();
                 m.weight = f[15].Get<uint32>();
+                m.baseChance = std::min<uint8>(f[16].Get<uint8>(), 100); m.threatWeights = ParseIds(f[17].Get<std::string>());
+                m.environment = f[18].Get<uint8>(); m.enemyRace = f[19].Get<uint8>(); m.cooldown = f[20].Get<uint32>();
+                m.location = f[21].Get<std::string>(); m.requiredTrait = f[22].Get<uint8>();
+                if (m.type > MAX_MISSION_TYPE) m.type = M_BATTLE;
+                if (m.environment > MAX_ENV) m.environment = 0;
+                if (m.enemyRace > MAX_ENEMY) m.enemyRace = 0;
                 missionTemplates[m.id] = m;
             } while (r->NextRow());
     }
@@ -288,6 +320,10 @@ namespace
                     CharacterDatabase.Execute("DELETE FROM mod_temucraft_mission WHERE owner = {} AND slot = {}", owner, m.slot);
                 }
             } while (r->NextRow());
+        if (QueryResult r = CharacterDatabase.Query("SELECT mission_id, ready_at FROM mod_temucraft_mission_cooldown WHERE owner = {}", owner))
+            do
+                d.cooldowns[r->Fetch()[0].Get<uint32>()] = r->Fetch()[1].Get<uint32>();
+            while (r->NextRow());
     }
 
     // states can change outside this module (companions), so they are read again whenever the table is used
@@ -344,12 +380,23 @@ namespace
         for (auto const& [s, m] : d.missions) if (!m.running()) ++offered;
         // top follower level decides which missions show up (a few levels above it)
         uint32 top = 1;
-        for (auto const& [id, f] : d.followers) top = std::max<uint32>(top, f.level);
+        std::set<uint8> owned;   // traits of the roster, for missions that need one (profession missions)
+        for (auto const& [id, f] : d.followers)
+        {
+            top = std::max<uint32>(top, f.level);
+            if (auto tt = followerTemplates.find(f.tmpl); tt != followerTemplates.end())
+                owned.insert(tt->second.traits.begin(), tt->second.traits.end());
+        }
         while (offered < cfg.offers)
         {
             std::vector<MissionTemplate const*> pool; uint32 total = 0;
             for (auto const& [id, t] : missionTemplates)
-                if (!have.count(id) && t.level <= top + 2 && t.weight) { pool.push_back(&t); total += t.weight; }
+            {
+                if (have.count(id) || t.level > top + 2 || !t.weight) continue;
+                if (t.requiredTrait && !owned.count(t.requiredTrait)) continue;
+                if (auto cd = d.cooldowns.find(id); cd != d.cooldowns.end() && cd->second > now) continue;
+                pool.push_back(&t); total += t.weight;
+            }
             if (pool.empty()) break;
             uint32 roll = std::uniform_int_distribution<uint32>(0, total - 1)(rng);
             MissionTemplate const* pick = pool.back();
@@ -359,45 +406,66 @@ namespace
         }
     }
 
-    // abilities of the chosen followers countering the mission's threats (each ability once)
-    uint32 Countered(MissionTemplate const& t, PlayerData const& d, std::vector<uint32> const& picked)
+    std::vector<Member> Units(PlayerData const& d, std::vector<uint32> const& picked)
     {
-        std::multiset<uint8> abilities;
+        std::vector<Member> out;
         for (uint32 id : picked)
-            if (auto it = d.followers.find(id); it != d.followers.end())
-                if (auto tt = followerTemplates.find(it->second.tmpl); tt != followerTemplates.end())
-                    abilities.insert(tt->second.abilities.begin(), tt->second.abilities.end());
-        uint32 n = 0;
-        for (uint8 threat : t.threats)
-            if (auto a = abilities.find(threat); a != abilities.end()) { abilities.erase(a); ++n; }
-        return n;
+        {
+            auto it = d.followers.find(id);
+            if (it == d.followers.end()) continue;
+            Member u; u.id = id; u.level = it->second.level; u.itemLevel = int32(it->second.itemLevel);
+            if (auto tt = followerTemplates.find(it->second.tmpl); tt != followerTemplates.end())
+            {
+                u.race = tt->second.race; u.abilities = tt->second.abilities; u.traits = tt->second.traits;
+            }
+            out.push_back(std::move(u));
+        }
+        return out;
     }
-    bool HasTrait(PlayerData const& d, std::vector<uint32> const& picked, uint8 trait)
+    // the strongest trait of this effect among the chosen followers (amount2), 0 if none
+    double EffectAmount(PlayerData const& d, std::vector<uint32> const& picked, uint8 effect)
     {
-        for (uint32 id : picked)
-            if (auto it = d.followers.find(id); it != d.followers.end())
-                if (auto tt = followerTemplates.find(it->second.tmpl); tt != followerTemplates.end())
-                    if (std::find(tt->second.traits.begin(), tt->second.traits.end(), trait) != tt->second.traits.end())
-                        return true;
+        double best = 0;
+        for (Member const& u : Units(d, picked))
+            for (uint8 tr : u.traits)
+                if (TraitInfo const* t = GetTrait(tr); t && t->effect == effect)
+                    best = std::max(best, t->amount2);
+        return best;
+    }
+    bool HasTraitId(PlayerData const& d, std::vector<uint32> const& picked, uint8 trait)
+    {
+        for (Member const& u : Units(d, picked))
+            if (std::find(u.traits.begin(), u.traits.end(), trait) != u.traits.end())
+                return true;
         return false;
+    }
+    // mission time after the config scale and Swift Feet style traits (the lowest multiplier counts, once)
+    uint32 MissionDuration(MissionTemplate const& t, PlayerData const& d, std::vector<uint32> const& picked)
+    {
+        double duration = double(t.duration) * cfg.durationScale;
+        double best = 100;
+        for (Member const& u : Units(d, picked))
+            for (uint8 tr : u.traits)
+                if (TraitInfo const* ti = GetTrait(tr); ti && ti->effect == EFF_TIME)
+                    best = std::min(best, ti->amount2);
+        return uint32(duration * best / 100.0);
+    }
+    Explain ExplainChance(MissionTemplate const& t, PlayerData const& d, std::vector<uint32> const& picked)
+    {
+        Setup m;
+        m.level = t.level; m.itemLevel = int32(t.itemLevel); m.base = t.baseChance; m.slots = t.slots;
+        m.duration = MissionDuration(t, d, picked); m.type = t.type; m.environment = t.environment; m.enemyRace = t.enemyRace;
+        m.requiredTrait = t.requiredTrait; m.threats = t.threats; m.weights = t.threatWeights; m.defaultWeight = cfg.threatWeight;
+        m.lucky = cfg.luckyBonus; m.maxChance = cfg.maxChance;
+        return Compute(m, Units(d, picked));
     }
     int32 Chance(MissionTemplate const& t, PlayerData const& d, std::vector<uint32> const& picked)
     {
-        if (picked.empty()) return 0;
-        float level = 0, ilvl = 0;
-        for (uint32 id : picked) { Follower const& f = d.followers.at(id); level += f.level; ilvl += f.itemLevel; }
-        level /= picked.size(); ilvl /= picked.size();
-        float chance = cfg.baseChance;
-        float diff = level - t.level;
-        chance += diff >= 0 ? diff * cfg.perLevel : diff * cfg.perLevelBelow;
-        if (t.itemLevel) chance += (ilvl - t.itemLevel) * cfg.perItemLevel;
-        chance += t.threats.empty() ? cfg.counterShare / 2.0f : cfg.counterShare * float(Countered(t, d, picked)) / t.threats.size();
-        for (uint32 id : picked)
-            if (auto tt = followerTemplates.find(d.followers.at(id).tmpl); tt != followerTemplates.end())
-                for (uint8 tr : tt->second.traits)
-                    if (tr == TRAIT_LUCKY) chance += cfg.luckyBonus;
-        chance *= float(picked.size()) / t.slots;
-        return std::clamp<int32>(int32(chance), 0, 200);
+        return ExplainChance(t, d, picked).Chance();
+    }
+    uint32 ThreatWeight(MissionTemplate const& t, size_t i)
+    {
+        return i < t.threatWeights.size() && t.threatWeights[i] ? t.threatWeights[i] : cfg.threatWeight;
     }
 
     void GiveItem(Player* player, uint32 item, uint32 count)
@@ -431,20 +499,28 @@ namespace
             bool bonus = success && m.chance > 100 && std::uniform_int_distribution<uint32>(1, 100)(rng) <= m.chance - 100;
             h.PSendSysMessage(Text(player, success ? S_SUCCESS : S_FAILED, success ? "|cff66ccffMission complete:|r {} succeeded." : "|cff66ccffMission complete:|r {} failed."), t.name);
             uint32 xp = success ? t.xp : t.xp / 4;
-            if (HasTrait(d, m.followers, TRAIT_QUICK_STUDY)) xp = xp * 3 / 2;
-            if (t.type == M_PATROL) xp *= 2;
-            if (success)
+            if (double pct = EffectAmount(d, m.followers, EFF_XP)) xp = uint32(xp * (100.0 + pct) / 100.0);
+            if (t.type == M_PATROL || t.type == M_TRAINING) xp *= 2;
+            if (success && t.type != M_TRAINING)   // training missions give follower experience only
             {
                 uint32 gold = t.gold;
                 if (t.type == M_TREASURE) gold *= 2;
-                if (HasTrait(d, m.followers, TRAIT_TREASURE)) gold = gold * 3 / 2;
+                if (double pct = EffectAmount(d, m.followers, EFF_GOLD)) gold = uint32(gold * (100.0 + pct) / 100.0);
+                uint32 itemCount = t.itemCount, bonusCount = t.bonusCount;
+                if (t.type == M_LOGISTICS) { itemCount *= 2; bonusCount *= 2; }   // logistics: twice the goods
                 if (gold) { player->ModifyMoney(gold); h.PSendSysMessage(Text(player, S_REWARD_GOLD, "  Reward: {} gold."), gold / 10000); }
-                if (t.item) { GiveItem(player, t.item, t.itemCount); h.PSendSysMessage(Text(player, S_REWARD_ITEM, "  Reward: {} x{}."), sObjectMgr->GetItemTemplate(t.item) ? sObjectMgr->GetItemTemplate(t.item)->Name1 : "?", t.itemCount); }
+                if (t.item) { GiveItem(player, t.item, itemCount); h.PSendSysMessage(Text(player, S_REWARD_ITEM, "  Reward: {} x{}."), sObjectMgr->GetItemTemplate(t.item) ? sObjectMgr->GetItemTemplate(t.item)->Name1 : "?", itemCount); }
                 if (bonus && t.bonusItem)
                 {
-                    GiveItem(player, t.bonusItem, t.bonusCount);
-                    h.PSendSysMessage(Text(player, S_BONUS, "  Bonus reward: {} x{}!"), sObjectMgr->GetItemTemplate(t.bonusItem) ? sObjectMgr->GetItemTemplate(t.bonusItem)->Name1 : "?", t.bonusCount);
+                    GiveItem(player, t.bonusItem, bonusCount);
+                    h.PSendSysMessage(Text(player, S_BONUS, "  Bonus reward: {} x{}!"), sObjectMgr->GetItemTemplate(t.bonusItem) ? sObjectMgr->GetItemTemplate(t.bonusItem)->Name1 : "?", bonusCount);
                 }
+            }
+            if (success && t.cooldown)
+            {
+                uint32 ready = t.cooldown >= ONE_TIME_COOLDOWN ? NEVER : uint32(std::min<uint64>(uint64(now) + t.cooldown, NEVER));
+                d.cooldowns[t.id] = ready;
+                CharacterDatabase.Execute("REPLACE INTO mod_temucraft_mission_cooldown (owner, mission_id, ready_at) VALUES ({}, {}, {})", player->GetGUID().GetCounter(), t.id, ready);
             }
             for (uint32 id : m.followers)
             {
@@ -486,7 +562,7 @@ namespace
         if (t)
         {
             for (uint8 a : t->abilities) if (a && a <= MAX_THREAT) { if (!counters.empty()) counters += ", "; counters += THREAT_NAMES[a]; }
-            for (uint8 tr : t->traits) if (tr && tr <= 5) { if (!traits.empty()) traits += ", "; traits += TRAIT_NAMES[tr]; }
+            for (uint8 tr : t->traits) if (GetTrait(tr)) { if (!traits.empty()) traits += ", "; traits += TraitName(tr); }
         }
         static char const* const state[] = { "", " [on a mission]", " [companion]" };
         return Acore::StringFormat(Text(player, S_FOLLOWER_LINE, "{} ({}) - level {}, item level {}{} | counters: {} | {}"),
@@ -524,9 +600,9 @@ namespace
         {
             if (m.running()) continue;
             MissionTemplate const& t = missionTemplates.at(m.mission);
-            static char const* const types[] = { "", " (patrol)", " (treasure)", " (rare)" };
+            std::string type = t.type == M_BATTLE ? std::string() : Acore::StringFormat(" ({})", TypeName(t.type));
             AddGossipItemFor(player, t.type == M_RARE ? GOSSIP_ICON_INTERACT_1 : GOSSIP_ICON_BATTLE,
-                Acore::StringFormat(Text(player, S_OFFER_LINE, "{}{} - level {}, {} follower(s), {}"), t.name, types[std::min<uint8>(t.type, 3)], t.level, t.slots,
+                Acore::StringFormat(Text(player, S_OFFER_LINE, "{}{} - level {}, {} follower(s), {}"), t.name, type, t.level, t.slots,
                     Duration(uint32(t.duration * cfg.durationScale))), GOSSIP_SENDER_MAIN, A_OFFER_BASE + slot);
             any = true;
         }
@@ -575,17 +651,52 @@ namespace
         AddGossipItemFor(player, GOSSIP_ICON_BATTLE, Acore::StringFormat(Text(player, S_MISSION_HEAD, "{} - level {}{}, {}, cost {} gold"), t.name, t.level,
             t.itemLevel ? Acore::StringFormat(" (item level {})", t.itemLevel) : std::string(), Duration(uint32(t.duration * cfg.durationScale)), t.cost / 10000),
             GOSSIP_SENDER_MAIN, A_NOOP);
-        for (uint8 threat : t.threats)
-            if (threat && threat <= MAX_THREAT)
-                AddGossipItemFor(player, GOSSIP_ICON_INTERACT_2, Acore::StringFormat(Text(player, S_THREAT_LINE, "  Threat: {}"), THREAT_NAMES[threat]), GOSSIP_SENDER_MAIN, A_NOOP);
+        AddGossipItemFor(player, GOSSIP_ICON_INTERACT_2, Acore::StringFormat(Text(player, S_WHERE, "  {} - {}, enemies: {}, base chance {}%"),
+            t.location.empty() ? std::string("-") : t.location, EnvName(t.environment), EnemyName(t.enemyRace), t.baseChance), GOSSIP_SENDER_MAIN, A_NOOP);
+        if (t.requiredTrait)
+            AddGossipItemFor(player, GOSSIP_ICON_INTERACT_2, Acore::StringFormat(Text(player, S_NEEDS_TRAIT, "  Needs a follower with: {}"), TraitName(t.requiredTrait)), GOSSIP_SENDER_MAIN, A_NOOP);
+        for (size_t i = 0; i < t.threats.size(); ++i)
+            if (t.threats[i] && t.threats[i] <= MAX_THREAT)
+                AddGossipItemFor(player, GOSSIP_ICON_INTERACT_2, Acore::StringFormat(Text(player, S_THREAT_WEIGHT, "  Threat: {} (weight {})"), THREAT_NAMES[t.threats[i]], ThreatWeight(t, i)), GOSSIP_SENDER_MAIN, A_NOOP);
+        Explain ex = ExplainChance(t, d, d.picked);
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, Acore::StringFormat(Text(player, S_CHANCE_LINE, "Success chance: {}%  ({}/{} followers, {} of {} threats countered)"),
-            Chance(t, d, d.picked), d.picked.size(), t.slots, Countered(t, d, d.picked), t.threats.size()), GOSSIP_SENDER_MAIN, A_NOOP);
-        for (uint32 id : d.picked)
-            AddGossipItemFor(player, GOSSIP_ICON_TRAINER, Acore::StringFormat(Text(player, S_PICKED_LINE, "  Sent: {}"), FollowerLine(player, d.followers.at(id))), GOSSIP_SENDER_MAIN, A_NOOP);
+            ex.Chance(), d.picked.size(), t.slots, ex.countered, t.threats.size()), GOSSIP_SENDER_MAIN, A_NOOP);
+        auto nameOf = [&](uint32 id) -> std::string
+        {
+            auto it = d.followers.find(id);
+            return it != d.followers.end() && followerTemplates.count(it->second.tmpl) ? followerTemplates[it->second.tmpl].name : std::string("?");
+        };
+        // the breakdown, as far as the menu has room (a gossip menu holds at most 32 lines; picking followers and
+        // the buttons come first)
+        std::vector<std::string> explainLines;
+        for (auto const& fp : ex.followers)
+            explainLines.push_back(Acore::StringFormat(Text(player, S_EXPLAIN_FOLLOWER, "  {} (level {}, item level {}): +{:.1f} points"),
+                nameOf(fp.id), fp.level, fp.itemLevel, fp.points));
+        for (auto const& tp : ex.threats)
+            if (!tp.by.empty())
+                explainLines.push_back(Acore::StringFormat(Text(player, S_EXPLAIN_THREAT, "  {} countered by {}: +{:.1f} points"),
+                    tp.threat <= MAX_THREAT ? THREAT_NAMES[tp.threat] : "?", nameOf(tp.by.front()), tp.points));
+        for (auto const& bp : ex.traits)
+            explainLines.push_back(Acore::StringFormat(Text(player, S_EXPLAIN_TRAIT, "  {} ({}): +{:.1f} points"),
+                TraitName(bp.trait), nameOf(bp.follower), bp.points));
+        std::vector<uint32> candidates;
         if (d.picked.size() < t.slots)
             for (auto const& [id, f] : d.followers)
                 if (f.state == F_IDLE && (f.mask & ACT_MISSIONS) && std::find(d.picked.begin(), d.picked.end(), id) == d.picked.end())
-                    AddGossipItemFor(player, GOSSIP_ICON_TRAINER, Acore::StringFormat(Text(player, S_PICK_LINE, "Send {}"), FollowerLine(player, f)), GOSSIP_SENDER_MAIN, A_PICK_BASE + id);
+                    candidates.push_back(id);
+        constexpr size_t MENU_MAX = 32;
+        size_t used = player->PlayerTalkClass->GetGossipMenu().GetMenuItemCount();
+        size_t buttons = 1 + (d.picked.empty() ? 0 : (d.picked.size() == t.slots ? 2 : 1));
+        size_t fixed = used + d.picked.size() + buttons;
+        size_t room = fixed < MENU_MAX ? MENU_MAX - fixed : 0;
+        if (candidates.size() > room) candidates.resize(room);
+        room -= candidates.size();
+        for (size_t i = 0; i < explainLines.size() && i < room; ++i)
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, explainLines[i], GOSSIP_SENDER_MAIN, A_NOOP);
+        for (uint32 id : d.picked)
+            AddGossipItemFor(player, GOSSIP_ICON_TRAINER, Acore::StringFormat(Text(player, S_PICKED_LINE, "  Sent: {}"), FollowerLine(player, d.followers.at(id))), GOSSIP_SENDER_MAIN, A_NOOP);
+        for (uint32 id : candidates)
+            AddGossipItemFor(player, GOSSIP_ICON_TRAINER, Acore::StringFormat(Text(player, S_PICK_LINE, "Send {}"), FollowerLine(player, d.followers.at(id))), GOSSIP_SENDER_MAIN, A_PICK_BASE + id);
         if (!d.picked.empty())
         {
             if (d.picked.size() == t.slots)
@@ -612,11 +723,15 @@ namespace
                 h.SendSysMessage(Text(player, S_BUSY, "One of those followers is busy (on a mission or out as a companion)."));
                 d.picked.clear(); return false;
             }
+        if (t.requiredTrait && !HasTraitId(d, d.picked, t.requiredTrait))
+        {
+            h.PSendSysMessage(Text(player, S_NO_TRAIT, "You need a follower with {} for this mission."), TraitName(t.requiredTrait));
+            return false;
+        }
         if (!player->HasEnoughMoney(t.cost)) { h.PSendSysMessage(Text(player, S_NO_MONEY, "This mission costs {} gold."), t.cost / 10000); return false; }
         player->ModifyMoney(-int32(t.cost));
         Mission& m = mit->second;
-        uint32 duration = uint32(t.duration * cfg.durationScale);
-        if (HasTrait(d, d.picked, TRAIT_FAST)) duration = duration * 3 / 4;
+        uint32 duration = MissionDuration(t, d, d.picked);
         m.chance = Chance(t, d, d.picked); m.start = Now(); m.end = m.start + duration; m.followers = d.picked;
         for (uint32 id : d.picked) { d.followers[id].state = F_ON_MISSION; SetState(player, id, F_IDLE, F_ON_MISSION); }
         SaveMission(player, m);
@@ -637,9 +752,16 @@ namespace
     // ------------------------------------------------------------------------------------------- addon window
     // TemucraftMissions (client addon) <-> server, prefix TMT, fields '~':
     //   client: HELLO | LIST | CHANCE~slot~ids | START~slot~ids | CLAIM
-    //   server: OPEN | BEGIN~now~gold~near | F~id~name~roles~level~xp~xpNext~ilvl~quality~state~mask~abilities~traits
-    //           | O~slot~name~type~level~ilvl~seconds~slots~cost~threats~expiresIn
-    //           | R~slot~name~chance~secondsLeft~followers | C~slot~chance~countered~threats | END
+    //   server: OPEN | BEGIN~now~gold~near | F~id~name~roles~level~xp~xpNext~ilvl~quality~state~mask~abilities~traits~race
+    //           | O~slot~name~type~level~ilvl~seconds~slots~cost~threats~expiresIn~environment~enemyRace~baseChance~weights~requiredTrait~location
+    //           | R~slot~name~chance~secondsLeft~followers | END
+    //   answer to CHANCE (the explain lines first, C last; points are in tenths):
+    //           XB~slot~base~totalWeight~points10~lucky10~mentor
+    //           XF~slot~follower~level~ilvl~bias100~points10          (one per follower)
+    //           XT~slot~threat~count~weight~removed~points10~followers (one per kind of threat)
+    //           XS~slot~follower~trait~points10                       (one per trait that applied)
+    //           C~slot~chance~countered~threats
+    // New fields are only ever added at the end, so an older window keeps working.
     std::string CsvBytes(std::vector<uint8> const& v)
     {
         std::string out;
@@ -663,9 +785,9 @@ namespace
         for (auto const& [id, f] : d.followers)
         {
             FollowerTemplate const* t = followerTemplates.count(f.tmpl) ? &followerTemplates[f.tmpl] : nullptr;
-            TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("F~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}", f.id,
+            TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("F~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}", f.id,
                 TemucraftAddonClean(t ? t->name : "?"), t ? t->roles : 4, f.level, f.xp, f.level >= cfg.maxLevel ? 0 : cfg.xpPerLevel * f.level,
-                f.itemLevel, f.quality, f.state, f.mask, t ? CsvBytes(t->abilities) : "", t ? CsvBytes(t->traits) : ""));
+                f.itemLevel, f.quality, f.state, f.mask, t ? CsvBytes(t->abilities) : "", t ? CsvBytes(t->traits) : "", t ? t->race : 0));
         }
         for (auto const& [slot, m] : d.missions)
         {
@@ -673,14 +795,36 @@ namespace
             if (!m.running())
             {
                 uint32 expires = m.offeredAt + cfg.offerHours * 3600;
-                TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("O~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}", slot, TemucraftAddonClean(t.name), t.type, t.level,
-                    t.itemLevel, uint32(t.duration * cfg.durationScale), t.slots, t.cost, CsvBytes(t.threats), expires > now ? expires - now : 0));
+                std::vector<uint32> weights;
+                for (size_t i = 0; i < t.threats.size(); ++i) weights.push_back(ThreatWeight(t, i));
+                TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("O~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}~{}", slot, TemucraftAddonClean(t.name), t.type, t.level,
+                    t.itemLevel, uint32(t.duration * cfg.durationScale), t.slots, t.cost, CsvBytes(t.threats), expires > now ? expires - now : 0,
+                    t.environment, t.enemyRace, t.baseChance, JoinIds(weights), t.requiredTrait, TemucraftAddonClean(t.location)));
             }
             else
                 TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("R~{}~{}~{}~{}~{}", slot, TemucraftAddonClean(t.name), m.chance,
                     m.end > now ? m.end - now : 0, JoinIds(m.followers)));
         }
         TemucraftAddonSend(player, ADDON_PREFIX, "END");
+    }
+
+    int32 Tenths(double v) { return int32(std::lround(v * 10.0)); }
+
+    // the breakdown of a success chance for the window, then the chance itself (C)
+    void SendExplain(Player* player, uint32 slot, MissionTemplate const& t, PlayerData const& d, std::vector<uint32> const& picked)
+    {
+        Explain ex = ExplainChance(t, d, picked);
+        TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("XB~{}~{}~{}~{}~{}~{}", slot, t.baseChance, uint32(ex.totalWeight),
+            Tenths(ex.points), Tenths(ex.lucky), ex.mentor ? 1 : 0));
+        for (auto const& fp : ex.followers)
+            TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("XF~{}~{}~{}~{}~{}~{}", slot, fp.id, fp.level, fp.itemLevel,
+                int32(std::lround(fp.bias * 100.0)), Tenths(fp.points)));
+        for (auto const& tp : ex.threats)
+            TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("XT~{}~{}~{}~{}~{}~{}~{}", slot, tp.threat, tp.count, tp.weight,
+                uint32(std::lround(tp.removed)), Tenths(tp.points), JoinIds(tp.by)));
+        for (auto const& bp : ex.traits)
+            TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("XS~{}~{}~{}~{}", slot, bp.follower, bp.trait, Tenths(bp.points)));
+        TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("C~{}~{}~{}~{}", slot, ex.Chance(), ex.countered, t.threats.size()));
     }
 
     // ids from the addon: owned, idle, can do missions, no repeats, at most `slots`
@@ -722,7 +866,7 @@ namespace
             std::vector<uint32> picked = PickedFromAddon(d, a[2], t.slots);
             if (cmd == "CHANCE")
             {
-                TemucraftAddonSend(player, ADDON_PREFIX, Acore::StringFormat("C~{}~{}~{}~{}", *slot, Chance(t, d, picked), Countered(t, d, picked), t.threats.size()));
+                SendExplain(player, *slot, t, d, picked);
                 return;
             }
             d.viewing = *slot; d.picked = picked;
@@ -853,6 +997,7 @@ namespace
         {
             CharacterDatabase.Execute("DELETE FROM mod_temucraft_follower WHERE owner = {}", guid.GetCounter());
             CharacterDatabase.Execute("DELETE FROM mod_temucraft_mission WHERE owner = {}", guid.GetCounter());
+            CharacterDatabase.Execute("DELETE FROM mod_temucraft_mission_cooldown WHERE owner = {}", guid.GetCounter());
         }
         void OnPlayerCompleteQuest(Player* player, Quest const* quest) override
         {
